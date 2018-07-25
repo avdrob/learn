@@ -1,0 +1,25 @@
+# Ignore files without extensions (binaries)
+*
+!*.*
+!*/
+
+# Object files & binaries
+*.o
+*.out
+
+# Hide dotfiles
+.*
+!.gitignore
+
+# Python-specific and unneeded
+*.ipynb
+__py*
+
+# Archives & packages
+*.zip
+*.[tr]ar
+*.gz
+*.tgz
+
+# Papers
+*.pdf
