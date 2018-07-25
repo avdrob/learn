@@ -1,0 +1,132 @@
+/*
+В этой части вам нужно реализовать операторы ввода и вывода для класса Rational. В результате у вас должен работать, например, такой код
+Rational r;
+cin >> r;
+cout << r;
+*/
+
+#include <iostream>
+#include <sstream>
+using namespace std;
+
+int Gcd(int a, int b) {
+	while (a != 0 && b != 0) {
+	    	if (a > b) {
+			a %= b;
+		} else {
+			b %= a;
+		}
+	}
+	return a + b;
+}
+
+class Rational {
+public:
+    Rational() {
+	p = 0;
+	q = 1;
+    }
+
+    Rational(int numerator, int denominator) {
+	int gcd = Gcd(abs(numerator), abs(denominator));
+        p = numerator / gcd;
+	q = denominator / gcd;
+	if (q < 0) {
+		p *= -1;
+		q *= -1;
+	}
+	if (p == 0) {
+		q = 1;
+	}
+    }
+
+    int Numerator() const {
+        return p;
+    }
+
+    int Denominator() const {
+        return q;
+    }
+
+private:
+	int p;
+	int q;
+};
+
+// Реализуйте для класса Rational операторы ==, + и -
+bool operator == (const Rational& lhs, const Rational rhs) {
+	if (lhs.Numerator() == rhs.Numerator() && lhs.Denominator() == rhs.Denominator()) {
+		return true;
+	} 
+	return false;
+}
+
+Rational operator + (const Rational& lhs, const Rational& rhs) {
+	int lcm = abs(lhs.Denominator()) * abs(rhs.Denominator()) / Gcd(abs(lhs.Denominator()), abs(rhs.Denominator()));
+	return Rational {lhs.Numerator() * (lcm / lhs.Denominator()) + rhs.Numerator() * (lcm / rhs.Denominator()), lcm};
+}
+
+Rational operator - (const Rational& lhs, const Rational& rhs) {
+	int lcm = abs(lhs.Denominator()) * abs(rhs.Denominator()) / Gcd(abs(lhs.Denominator()), abs(rhs.Denominator()));
+	return Rational {lhs.Numerator() * (lcm / lhs.Denominator()) - rhs.Numerator() * (lcm / rhs.Denominator()), lcm};
+}
+
+// Реализуйте для класса Rational операторы * и /
+Rational operator * (const Rational& lhs, const Rational& rhs) {
+	return Rational {lhs.Numerator() * rhs.Numerator(), lhs.Denominator() * rhs.Denominator()};
+}
+
+Rational operator / (const Rational& lhs, const Rational& rhs) {
+	return Rational {lhs.Numerator() * rhs.Denominator(), lhs.Denominator() * rhs.Numerator()};
+}
+
+// Реализуйте для класса Rational операторы << и >>
+ostream& operator << (ostream& stream, Rational rat) {
+	stream << rat.Numerator() << '/' << rat.Denominator();
+	return stream;
+}
+
+istream& operator >> (istream& stream, Rational& rat) {
+	int p, q;
+	stream >> p;
+	stream.ignore(1);
+	stream >> q;
+	rat = Rational(p, q);
+	return stream;
+}
+
+int main() {
+    {
+        ostringstream output;
+        output << Rational(-6, 8);
+        if (output.str() != "-3/4") {
+            cout << "Rational(-6, 8) should be written as \"-3/4\"" << endl;
+            return 1;
+        }
+    }
+
+    {
+        istringstream input("5/7");
+        Rational r;
+        input >> r;
+        bool equal = r == Rational(5, 7);
+        if (!equal) {
+            cout << "5/7 is incorrectly read as " << r << endl;
+            return 2;
+        }
+    }
+
+    {
+        istringstream input("5/7 10/8");
+        Rational r1, r2;
+        input >> r1 >> r2;
+        bool correct = r1 == Rational(5, 7) && r2 == Rational(5, 4);
+        if (!correct) {
+            cout << "Multiple values are read incorrectly: " << r1 << " " << r2 << endl;
+            return 3;
+        }
+    }
+
+    cout << "OK" << endl;
+    return 0;
+}
