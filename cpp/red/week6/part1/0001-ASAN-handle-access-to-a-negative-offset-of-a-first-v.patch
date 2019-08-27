@@ -1,0 +1,308 @@
+From bd84685f3246c927ac1635e8a3da79c29ad53432 Mon Sep 17 00:00:00 2001
+From: marxin <mliska@suse.cz>
+Date: Wed, 20 Feb 2019 16:28:04 +0100
+Subject: [PATCH] ASAN: handle access to a negative offset of a first variable
+ in a TU (PR sanitizer/82501).
+
+gcc/ChangeLog:
+
+2019-02-22  Andrey Drobyshev  <a.drobyshev@samsung.com>
+	    Martin Liska  <mliska@suse.cz>
+
+	PR sanitizer/82501
+	* asan.c (build_globals_protector_decl): New.
+	(asan_emit_globals_protector): Likewise.
+	* asan.h (asan_emit_globals_protector): New declaration.
+	* cgraph.h (::add): Change return type.
+	* cgraphunit.c (output_in_order): Call
+	asan_emit_globals_protector.
+	* varpool.c (varpool_node::add): Change signature.
+
+gcc/testsuite/ChangeLog:
+
+2019-02-22  Andrey Drobyshev  <a.drobyshev@samsung.com>
+	    Martin Liska  <mliska@suse.cz>
+
+	PR sanitizer/82501
+	* c-c++-common/asan/global-overflow-2.c: New test.
+	* c-c++-common/asan/global-overflow-3.c: New test.
+	* c-c++-common/asan/global-overflow-4.c: New test.
+	* c-c++-common/asan/user-section-1.c: Update expected number of
+	pattern.
+	* c-c++-common/asan/user-section-2.c: Likewise.
+	* c-c++-common/asan/user-section-3.c: Likewise.
+---
+ gcc/asan.c                                    | 82 +++++++++++++++++++
+ gcc/asan.h                                    |  2 +
+ gcc/cgraph.h                                  |  2 +-
+ gcc/cgraphunit.c                              |  4 +
+ .../c-c++-common/asan/global-overflow-2.c     | 13 +++
+ .../c-c++-common/asan/global-overflow-3.c     | 14 ++++
+ .../c-c++-common/asan/global-overflow-4.c     | 14 ++++
+ .../c-c++-common/asan/user-section-1.c        |  2 +-
+ .../c-c++-common/asan/user-section-2.c        |  2 +-
+ .../c-c++-common/asan/user-section-3.c        |  2 +-
+ gcc/varpool.c                                 |  6 +-
+ 11 files changed, 137 insertions(+), 6 deletions(-)
+ create mode 100644 gcc/testsuite/c-c++-common/asan/global-overflow-2.c
+ create mode 100644 gcc/testsuite/c-c++-common/asan/global-overflow-3.c
+ create mode 100644 gcc/testsuite/c-c++-common/asan/global-overflow-4.c
+
+diff --git a/gcc/asan.c b/gcc/asan.c
+index 3b800b26b69..93e7953e022 100644
+--- a/gcc/asan.c
++++ b/gcc/asan.c
+@@ -3610,6 +3610,88 @@ gate_asan (void)
+   return sanitize_flags_p (SANITIZE_ADDRESS);
+ }
+ 
++/* Build a dummy ASAN global variable declaration.
++   ID is a name of the variable,
++   SHOULD_INIT drives variable initialization and IS_READONLY is used
++   to set TREE_READONLY flag.  */
++
++static tree
++build_globals_protector_decl (tree id, bool should_init, bool is_readonly)
++{
++  static tree type = char_type_node;
++  tree decl = build_decl (BUILTINS_LOCATION, VAR_DECL, id, type);
++
++  SET_DECL_ASSEMBLER_NAME (decl, id);
++  TREE_ADDRESSABLE (decl) = 1;
++  DECL_ARTIFICIAL (decl) = 1;
++  TREE_STATIC (decl) = 1;
++  TREE_USED (decl) = 1;
++  if (should_init)
++    {
++      tree init = build_one_cst (type);
++      TREE_STATIC (init) = 1;
++      DECL_INITIAL (decl) = init;
++    }
++  if (is_readonly)
++    TREE_READONLY (decl) = 1;
++
++  return decl;
++}
++
++/* Emit dummy global variables that will help to handle an access to a negative
++   offset of a first global variable in a translation unit (PR82501).  */
++
++void
++asan_emit_globals_protector (void)
++{
++  varpool_node *pv;
++
++  hash_set<int_hash<int, -1, -2> > dummy_sections;
++
++  FOR_EACH_DEFINED_VARIABLE (pv)
++    if (asan_protect_global (pv->decl), true)
++      {
++	section_category sc = categorize_decl_for_section (pv->decl, 0);
++	if (dummy_sections.contains ((int)sc))
++	  continue;
++	dummy_sections.add ((int)sc);
++	tree decl = NULL_TREE;
++
++	switch (sc)
++	  {
++	  case SECCAT_BSS:
++	    {
++	      const char *name = "__asan_bss_dummy_global";
++	      decl = build_globals_protector_decl (get_identifier (name),
++						   false, false);
++	      break;
++	    }
++	  case SECCAT_RODATA:
++	    {
++	      const char *name = "__asan_rodata_dummy_global";
++	      decl = build_globals_protector_decl (get_identifier (name),
++						   true, true);
++	      break;
++	    }
++	  case SECCAT_DATA:
++	    {
++	      const char *name = "__asan_data_dummy_global";
++	      decl = build_globals_protector_decl (get_identifier (name),
++						   true, false);
++	      break;
++	    }
++	  default:
++	    break;
++	  }
++
++	if (decl != NULL_TREE)
++	  {
++	    varpool_node *v = varpool_node::add (decl);
++	    v->force_output = 1;
++	  }
++      }
++}
++
+ namespace {
+ 
+ const pass_data pass_data_asan =
+diff --git a/gcc/asan.h b/gcc/asan.h
+index 7675f18a84e..7c8d390d95a 100644
+--- a/gcc/asan.h
++++ b/gcc/asan.h
+@@ -137,6 +137,8 @@ extern bool asan_sanitize_allocas_p (void);
+ 
+ extern hash_set<tree> *asan_handled_variables;
+ 
++extern void asan_emit_globals_protector (void);
++
+ /* Return TRUE if builtin with given FCODE will be intercepted by
+    libasan.  */
+ 
+diff --git a/gcc/cgraph.h b/gcc/cgraph.h
+index c294602d762..297eb80b94b 100644
+--- a/gcc/cgraph.h
++++ b/gcc/cgraph.h
+@@ -1918,7 +1918,7 @@ public:
+      Unlike finalize_decl function is intended to be used
+      by middle end and allows insertion of new variable at arbitrary point
+      of compilation.  */
+-  static void add (tree decl);
++  static varpool_node *add (tree decl);
+ 
+   /* Return varpool node for given symbol and check it is a function. */
+   static inline varpool_node *get (const_tree decl);
+diff --git a/gcc/cgraphunit.c b/gcc/cgraphunit.c
+index 8bfbd0bb12f..c826cdb191d 100644
+--- a/gcc/cgraphunit.c
++++ b/gcc/cgraphunit.c
+@@ -205,6 +205,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "lto-section-names.h"
+ #include "stringpool.h"
+ #include "attribs.h"
++#include "asan.h"
+ 
+ /* Queue of cgraph nodes scheduled to be added into cgraph.  This is a
+    secondary queue used during optimization to accommodate passes that
+@@ -2419,6 +2420,9 @@ output_in_order (void)
+       nodes[i].u.v = pv;
+     }
+ 
++  if (flag_sanitize & SANITIZE_ADDRESS)
++    asan_emit_globals_protector ();
++
+   for (pa = symtab->first_asm_symbol (); pa; pa = pa->next)
+     {
+       i = pa->order;
+diff --git a/gcc/testsuite/c-c++-common/asan/global-overflow-2.c b/gcc/testsuite/c-c++-common/asan/global-overflow-2.c
+new file mode 100644
+index 00000000000..f00905759ab
+--- /dev/null
++++ b/gcc/testsuite/c-c++-common/asan/global-overflow-2.c
+@@ -0,0 +1,13 @@
++/* { dg-do run } */
++/* { dg-shouldfail "asan" } */
++
++const char c1[] = "abcdefg";
++
++int main() {
++  return *(&c1[0]-1);
++}
++
++/* { dg-output "READ of size 1 at 0x\[0-9a-f\]+ thread T0.*(\n|\r\n|\r)" } */
++/* { dg-output "    #0 0x\[0-9a-f\]+ +(in _*main (\[^\n\r]*global-overflow-2.c:7|\[^\n\r]*:0|\[^\n\r]*\+0x\[0-9a-z\]*)|\[(\])\[^\n\r]*(\n|\r\n|\r).*" } */
++/* { dg-output "0x\[0-9a-f\]+ is located 1 bytes to the left of global variable" } */
++/* { dg-output ".*c1\[^\n\r]* of size 8\[^\n\r]*(\n|\r\n|\r)" } */
+diff --git a/gcc/testsuite/c-c++-common/asan/global-overflow-3.c b/gcc/testsuite/c-c++-common/asan/global-overflow-3.c
+new file mode 100644
+index 00000000000..ff542d80463
+--- /dev/null
++++ b/gcc/testsuite/c-c++-common/asan/global-overflow-3.c
+@@ -0,0 +1,14 @@
++/* { dg-do run } */
++/* { dg-options "-fno-common" } */
++/* { dg-shouldfail "asan" } */
++
++volatile int var;
++
++int main() {
++  return *(&var-1);
++}
++
++/* { dg-output "READ of size 4 at 0x\[0-9a-f\]+ thread T0.*(\n|\r\n|\r)" } */
++/* { dg-output "    #0 0x\[0-9a-f\]+ +(in _*main (\[^\n\r]*global-overflow-3.c:8|\[^\n\r]*:0|\[^\n\r]*\+0x\[0-9a-z\]*)|\[(\])\[^\n\r]*(\n|\r\n|\r).*" } */
++/* { dg-output "0x\[0-9a-f\]+ is located 4 bytes to the left of global variable" } */
++/* { dg-output ".*var\[^\n\r]* of size 4\[^\n\r]*(\n|\r\n|\r)" } */
+diff --git a/gcc/testsuite/c-c++-common/asan/global-overflow-4.c b/gcc/testsuite/c-c++-common/asan/global-overflow-4.c
+new file mode 100644
+index 00000000000..524cb198eb7
+--- /dev/null
++++ b/gcc/testsuite/c-c++-common/asan/global-overflow-4.c
+@@ -0,0 +1,14 @@
++/* { dg-do run } */
++/* { dg-options "-fno-common" } */
++/* { dg-shouldfail "asan" } */
++
++volatile int var = 12345;
++
++int main() {
++  return *(&var-1);
++}
++
++/* { dg-output "READ of size 4 at 0x\[0-9a-f\]+ thread T0.*(\n|\r\n|\r)" } */
+
++/* { dg-output ".*var\[^\n\r]* of size 4\[^\n\r]*(\n|\r\n|\r)" } */
+diff --git a/gcc/testsuite/c-c++-common/asan/user-section-1.c b/gcc/testsuite/c-c++-common/asan/user-section-1.c
+index 7bcc4bc1c3e..370f7f359b6 100644
+--- a/gcc/testsuite/c-c++-common/asan/user-section-1.c
++++ b/gcc/testsuite/c-c++-common/asan/user-section-1.c
+@@ -6,5 +6,5 @@ int x __attribute__((section(".xxx"))) = 1;
+ int y __attribute__((section(".yyy"))) = 1;
+ int z __attribute__((section(".zzz"))) = 1;
+ 
+-/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 2\);" "sanopt" } } */
++/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 3\);" "sanopt" } } */
+ 
+diff --git a/gcc/testsuite/c-c++-common/asan/user-section-2.c b/gcc/testsuite/c-c++-common/asan/user-section-2.c
+index 0c035c37952..5f1e670ce40 100644
+--- a/gcc/testsuite/c-c++-common/asan/user-section-2.c
++++ b/gcc/testsuite/c-c++-common/asan/user-section-2.c
+@@ -6,5 +6,5 @@ int x __attribute__((section(".x1"))) = 1;
+ int y __attribute__((section(".x2"))) = 1;
+ int z __attribute__((section(".x3"))) = 1;
+ 
+-/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 3\);" "sanopt" } } */
++/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 4\);" "sanopt" } } */
+ 
+diff --git a/gcc/testsuite/c-c++-common/asan/user-section-3.c b/gcc/testsuite/c-c++-common/asan/user-section-3.c
+index 3e32591b1d4..e8066d2428c 100644
+--- a/gcc/testsuite/c-c++-common/asan/user-section-3.c
++++ b/gcc/testsuite/c-c++-common/asan/user-section-3.c
+@@ -6,5 +6,5 @@ int x __attribute__((section(".x1"))) = 1;
+ int y __attribute__((section(".x2"))) = 1;
+ int z __attribute__((section(".y1"))) = 1;
+ 
+-/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 1\);" "sanopt" } } */
++/* { dg-final { scan-tree-dump "__builtin___asan_unregister_globals \(.*, 2\);" "sanopt" } } */
+ 
+diff --git a/gcc/varpool.c b/gcc/varpool.c
+index 8e5a9372656..3f7140625c2 100644
+--- a/gcc/varpool.c
++++ b/gcc/varpool.c
+@@ -460,8 +460,8 @@ ctor_for_folding (tree decl)
+ /* Add the variable DECL to the varpool.
+    Unlike finalize_decl function is intended to be used
+    by middle end and allows insertion of new variable at arbitrary point
+-   of compilation.  */
+-void
++   of compilation.  Return newly created varpool_node.  */
++varpool_node *
+ varpool_node::add (tree decl)
+ {
+   varpool_node *node;
+@@ -472,6 +472,8 @@ varpool_node::add (tree decl)
+     node->externally_visible = true;
+   if (lookup_attribute ("no_reorder", DECL_ATTRIBUTES (decl)))
+     node->no_reorder = 1;
++
++  return node;
+ }
+ 
+ /* Return variable availability.  See cgraph.h for description of individual
+-- 
+2.20.1
